@@ -151,3 +151,22 @@ test('a failed currency does not hide a good balance in the credits cell', () =>
   const { text } = renderRow(credits, { now: NOW });
   assert.ok(text.includes('8.44'), `expected the good balance, got: ${text}`);
 });
+
+test('a fresh account wins the cell once the stale one is pruned', () => {
+  // The reported bug: a rotated credential left a frozen account first in
+  // groupRows' order, masking the live account. After pollOnce retires the
+  // stale identity, the cell must show the fresh reading.
+  const staleAcc = acc('a'), liveAcc = acc('b');
+  const masked = groupRows([
+    success(id('openai-codex', staleAcc, 'quota:5h'), quota(100), '2026-09-14T11:00:00Z'),
+    success(id('openai-codex', liveAcc, 'quota:5h'), quota(40), at),
+  ], [], { now: NOW });
+  assert.equal(masked[0].account, staleAcc, 'pre-fix: first-in-order account masks the live one');
+
+  const reconciled = groupRows([
+    success(id('openai-codex', liveAcc, 'quota:5h'), quota(40), at),
+  ], [], { now: NOW });
+  assert.equal(reconciled[0].account, liveAcc);
+  const five = reconciled[0].quota.get('quota:5h');
+  assert.equal(five.value.remainingPercent, 40, 'the live reading renders, not the frozen one');
+});

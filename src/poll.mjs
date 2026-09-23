@@ -88,7 +88,11 @@ function record(idBase, metrics, observations, readings, at) {
   }
 }
 
-/** Run one job with its own timeout, then record the outcome. */
+/**
+ * Run one job with its own timeout, then record the outcome.
+ * @returns {Promise<boolean>} true when the adapter produced at least one
+ *   observation — the only outcome that proves the account is really there.
+ */
 async function runJob(job, readings, timeoutMs) {
   const controller = new AbortController();
   const at = new Date().toISOString();
@@ -103,7 +107,9 @@ async function runJob(job, readings, timeoutMs) {
       controller.abort();
       reject(Object.assign(new Error('timeout'), { code: 'timeout' }));
     }, timeoutMs);
-    timer.unref?.();
+    // Node returns a Timeout (which has unref); DOM lib types it as number.
+    // The optional call is intentional — it is a no-op where unref is absent.
+    /** @type {any} */ (timer).unref?.();
   });
   try {
     const running = job.adapter.run(job.parameters, controller.signal);
@@ -112,6 +118,7 @@ async function runJob(job, readings, timeoutMs) {
     running.catch(() => {});
     const observations = await Promise.race([running, expired]);
     record(idBase, job.metrics, observations, readings, at);
+    return Array.isArray(observations) && observations.length > 0;
   } catch (error) {
     const code = FAILURE_CODES.has(/** @type {any} */ (error)?.code) ? /** @type {any} */ (error).code : 'transport';
     for (const metric of job.metrics) {
@@ -119,6 +126,7 @@ async function runJob(job, readings, timeoutMs) {
       const key = readingKey(identity);
       readings.set(key, failure(identity, readings.get(key), code, at));
     }
+    return false;
   } finally {
     clearTimeout(timer);
   }
@@ -162,11 +170,27 @@ export async function pollOnce(requests, {
   const worker = async () => {
     while (cursor < jobs.length) {
       const job = jobs[cursor++];
-      await runJob(job, readings, timeoutMs);
+      if (await runJob(job, readings, timeoutMs)) succeeded.add(`${job.provider}\u0000${job.account}`);
       notify();
     }
   };
+  const succeeded = new Set();
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, jobs.length)) }, worker));
+
+  // Retire readings for accounts a cycle proves are gone. Proof is narrow: a
+  // provider whose job this cycle produced at least one observation. Only then
+  // are its OTHER accounts known-superseded (a rotated credential mints a new
+  // identity; the old one can never resolve again). A provider that failed,
+  // was skipped, or was never requested keeps every reading — an absent job
+  // says nothing about its accounts, so dropping them would lose last-good
+  // data on exactly the transient failures the stale marker exists to show.
+  const refreshedProviders = new Set([...succeeded].map(k => k.split('\u0000')[0]));
+  for (const key of [...readings.keys()]) {
+    const identity = readings.get(key)?.identity;
+    if (!identity || !refreshedProviders.has(identity.provider)) continue;
+    if (!succeeded.has(`${identity.provider}\u0000${identity.account}`)) readings.delete(key);
+  }
+
   notify();
   return readings;
 }

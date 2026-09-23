@@ -201,3 +201,143 @@ test('an optional metric that was never reported leaves no failure behind', asyn
   assert.equal(eurAfter.value.total, '5.00', 'keeping last-good');
   assert.equal(eurAfter.error, 'invalid-response', 'and the loss is recorded');
 });
+
+test("a superseded account is retired once its provider reads successfully", async () => {
+  // The codex rotation case: a renewed credential minted a new account id and
+  // the old one's readings froze. Once the provider answers successfully under
+  // the new identity, the old account's frozen readings must go — they can
+  // otherwise keep rendering ahead of the live account.
+  const readings = new Map();
+  const stale = { provider: "p", account: accountId("old-scope"), metric: "quota:5h" };
+  readings.set(readingKey(stale), success(stale, { kind: "quota", remainingPercent: 99, resetAt: null }, "2026-09-21T16:00:00Z"));
+
+  await pollOnce([{ provider: "p", adapter: "a", config: {} }], {
+    adapters: registry({
+      a: adapter({ scope: "new-scope", run: async () => [{ metric: "quota:5h", value: { kind: "quota", remainingPercent: 40, resetAt: null }, observedAt: "2026-09-23T03:00:00Z" }] }),
+    }),
+    readings,
+  });
+
+  assert.equal(readings.has(readingKey(stale)), false, "the superseded account's frozen reading must go");
+  const live = [...readings.values()].find((r) => r.identity.account === accountId("new-scope"));
+  assert.equal(live.value.remainingPercent, 40, "the live account's reading remains");
+});
+
+test("readings survive a cycle with no requests at all", async () => {
+  // An empty request list (e.g. every auth resolution failed that cycle) says
+  // nothing about which accounts exist — wiping the map would lose last-good
+  // data on exactly the transient failure the stale marker exists to show.
+  const readings = new Map();
+  const id = { provider: "p", account: accountId("x"), metric: "quota:5h" };
+  readings.set(readingKey(id), success(id, { kind: "quota", remainingPercent: 55, resetAt: null }, "2026-09-23T02:00:00Z"));
+
+  await pollOnce([], { adapters: registry({}), readings });
+  assert.equal(readings.get(readingKey(id))?.value?.remainingPercent, 55);
+});
+
+test("a failed or empty observation does not retire sibling accounts", async () => {
+  // Only a provider that produced at least one observation this cycle may
+  // retire its other accounts. A failed job — or a resolved-but-empty one —
+  // proves nothing about which of its accounts are real.
+  for (const run of [
+    async () => { throw Object.assign(new Error("nope"), { code: "transport" }); },
+    async () => [],
+  ]) {
+    const readings = new Map();
+    const stale = { provider: "p", account: accountId("old-scope"), metric: "quota:5h" };
+    readings.set(readingKey(stale), success(stale, { kind: "quota", remainingPercent: 99, resetAt: null }, "2026-09-21T16:00:00Z"));
+    await pollOnce([{ provider: "p", adapter: "a", config: {} }], {
+      adapters: registry({ a: adapter({ scope: "new-scope", run }) }),
+      readings,
+    });
+    assert.ok(readings.has(readingKey(stale)), "no successful observation => nothing is retired");
+  }
+});
+
+test("a skipped provider keeps its readings", async () => {
+  // Unknown adapter and normalize() throwing both drop the job before it runs;
+  // neither may cost the provider its last-good readings.
+  for (const request of [
+    { provider: "p", adapter: "no-such-adapter", config: {} },
+    { provider: "p", adapter: "a", config: {} },
+  ]) {
+    const readings = new Map();
+    const id = { provider: "p", account: accountId("x"), metric: "quota:5h" };
+    readings.set(readingKey(id), success(id, { kind: "quota", remainingPercent: 55, resetAt: null }, "2026-09-23T02:00:00Z"));
+    await pollOnce([request], {
+      adapters: registry({ a: adapter({ normalize: () => { throw new Error("bad config"); }, run: async () => [] }) }),
+      readings,
+    });
+    assert.ok(readings.has(readingKey(id)), `skipped job must not prune (adapter: ${request.adapter})`);
+  }
+});
+
+test("a second still-live account of the same provider is not retired", async () => {
+  // Two configured accounts, both polled: the one that succeeds retires only
+  // accounts absent from this cycle entirely — never a sibling account whose
+  // own job merely failed.
+  const readings = new Map();
+  for (const scope of ["acct-1", "acct-2"]) {
+    const id = { provider: "p", account: accountId(scope), metric: "quota:5h" };
+    readings.set(readingKey(id), success(id, { kind: "quota", remainingPercent: 10, resetAt: null }, "2026-09-23T02:00:00Z"));
+  }
+  await pollOnce(
+    [{ provider: "p", adapter: "a", config: { which: "acct-1" } }, { provider: "p", adapter: "a", config: { which: "acct-2" } }],
+    {
+      adapters: registry({
+        a: {
+          normalize: (config) => ({ capability: "quota", credentialScope: config.which, parameters: {}, metrics: ["quota:5h"] }),
+          run: async (_p, _s) => [{ metric: "quota:5h", value: { kind: "quota", remainingPercent: 50, resetAt: null }, observedAt: "2026-09-23T03:00:00Z" }],
+        },
+      }),
+      readings,
+      concurrency: 1,
+    },
+  );
+  assert.ok(readings.has(readingKey({ provider: "p", account: accountId("acct-1"), metric: "quota:5h" })));
+  assert.ok(readings.has(readingKey({ provider: "p", account: accountId("acct-2"), metric: "quota:5h" })),
+    "a configured sibling account is never pruned");
+});
+
+test("a transient failure keeps its identity — pruning is not failure handling", async () => {
+  // A job that fails still resolved an account this cycle, so its readings stay
+  // (marked with the error) rather than being dropped alongside truly gone
+  // accounts.
+  const readings = new Map();
+  const id = { provider: "p", account: accountId("x"), metric: "quota:5h" };
+  readings.set(readingKey(id), success(id, { kind: "quota", remainingPercent: 55, resetAt: null }, "2026-09-23T02:00:00Z"));
+
+  await pollOnce([{ provider: "p", adapter: "a", config: {} }], {
+    adapters: registry({
+      a: adapter({ scope: "x", run: async () => { throw Object.assign(new Error("nope"), { code: "transport" }); } }),
+    }),
+    readings,
+  });
+
+  const kept = readings.get(readingKey(id));
+  assert.ok(kept, "a failed attempt must not prune the account's last-good");
+  assert.equal(kept.value.remainingPercent, 55);
+  assert.equal(kept.error, "transport");
+});
+
+test("two rotated tokens for one account update a single identity across polls", async () => {
+  // End-to-end for the codex fix: normalize() maps each token to its account
+  // claim, so a renewal lands on the same reading instead of minting a twin.
+  const jwt = (acct, tag) => `h.${Buffer.from(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: acct }, nonce: tag,
+  })).toString("base64url")}.${tag}`;
+  const codexish = {
+    normalize: (config) => {
+      const payload = JSON.parse(Buffer.from(config.token.split(".")[1], "base64url").toString());
+      const acct = payload["https://api.openai.com/auth"].chatgpt_account_id;
+      return { capability: "quota", credentialScope: `codex:${acct}`, parameters: {}, metrics: ["quota:5h"] };
+    },
+    run: async (_p, _s) => [{ metric: "quota:5h", value: { kind: "quota", remainingPercent: 50, resetAt: null }, observedAt: "2026-09-23T03:00:00Z" }],
+  };
+  const readings = new Map();
+  const adapters = registry({ codex: codexish });
+  await pollOnce([{ provider: "openai-codex", adapter: "codex", config: { token: jwt("acct-1", "t1") } }], { adapters, readings });
+  await pollOnce([{ provider: "openai-codex", adapter: "codex", config: { token: jwt("acct-1", "t2") } }], { adapters, readings });
+  const accounts = new Set([...readings.values()].map((r) => r.identity.account));
+  assert.equal(accounts.size, 1, "renewal must not mint a second account");
+});

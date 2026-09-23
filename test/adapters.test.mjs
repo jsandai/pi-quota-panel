@@ -275,3 +275,28 @@ test("an HTTP 401 becomes unauthorized, not a parse error", async () => {
     m.close();
   }
 });
+
+test("codex identity follows the account, not the rotating access token", () => {
+  // OAuth renewal hands the panel a fresh access token each time. Two tokens
+  // carrying the same chatgpt_account_id claim must normalize to ONE credential
+  // scope — otherwise every renewal mints a new "account" whose predecessor's
+  // readings freeze and can keep rendering ahead of the live one.
+  const jwt = (accountId, tag) => {
+    const payload = Buffer.from(
+      JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId }, nonce: tag }),
+    ).toString("base64url");
+    return `h.${payload}.${tag}`;
+  };
+  const first = codexAdapter.normalize({ token: jwt("acct-1", "tok1") });
+  const renewed = codexAdapter.normalize({ token: jwt("acct-1", "tok2") });
+  assert.equal(first.credentialScope, renewed.credentialScope,
+    "renewal must update the same identity, not mint a new account");
+
+  const other = codexAdapter.normalize({ token: jwt("acct-2", "tok1") });
+  assert.notEqual(other.credentialScope, first.credentialScope,
+    "genuinely different accounts stay distinct");
+
+  const undecodable = codexAdapter.normalize({ token: "not-a-jwt" });
+  assert.equal(undecodable.credentialScope, "codex:not-a-jwt",
+    "a token without a decodable claim falls back to the token itself");
+});

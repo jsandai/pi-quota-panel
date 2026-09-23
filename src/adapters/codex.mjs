@@ -90,7 +90,13 @@ export const codexAdapter = {
       ? config.accountId : accountIdFromJwt(config.token);
     return {
       capability: /** @type {'quota'} */ ('quota'),
-      credentialScope: `codex:${config.token}`,
+      // Scope to the ChatGPT account id, not the access token: the token is a
+      // short-lived JWT that OAuth renewal rotates, and a rotating scope made
+      // every renewal mint a new "account" whose predecessor's readings froze
+      // in place — and could keep rendering ahead of the live account. A token
+      // whose claim cannot be decoded falls back to the raw token, preserving
+      // the old behavior for malformed input.
+      credentialScope: `codex:${accountId ?? config.token}`,
       parameters: { token: config.token, accountId, baseUrl: config.baseUrl },
       metrics: ['quota:5h', 'quota:weekly'],
     };
