@@ -65,6 +65,23 @@ test("a failure keeps last-good but does NOT advance freshness", async () => {
   assert.equal(reading.error, "transport");
 });
 
+test("a failure keeps the source tag so omarchy's stale window survives", async () => {
+  const good = "2026-09-16T12:00:00Z";
+  const readings = new Map();
+  const id = { provider: "meta", account: accountId("x"), metric: "quota:window" };
+  readings.set(readingKey(id), success(id, { kind: "quota", remainingPercent: 90, resetAt: null }, good, "omarchy"));
+  await pollOnce([{ provider: "meta", adapter: "a", config: {} }], {
+    adapters: registry({
+      a: adapter({ scope: "x", metrics: ["quota:window"], run: async () => { throw Object.assign(new Error("gone"), { code: "unavailable" }); } }),
+    }),
+    readings,
+  });
+  const reading = readings.get(readingKey(id));
+  assert.equal(reading.source, "omarchy", "a failed refresh must not drop the source tag");
+  assert.equal(reading.freshAt, good);
+  assert.equal(reading.error, "unavailable");
+});
+
 test("an unknown error code is not passed through verbatim", async () => {
   const readings = await pollOnce([{ provider: "p", adapter: "a", config: {} }], {
     adapters: registry({

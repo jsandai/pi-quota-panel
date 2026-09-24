@@ -42,13 +42,13 @@ Supported today, and what has to be installed for each row to exist at all:
 | `openai-codex` | Codex | 5H / 7D quota | built into pi |
 | `deepseek` | DS | prepaid credit, USD | built into pi |
 | `openrouter` | OR | prepaid credit, USD | built into pi |
-| `muse-code` | Muse | 5H / 7D quota | the `pi-muse-bridge` extension |
+| `meta` (legacy `muse-code`) | Muse | 5H / 7D quota | built into pi (`/login meta`) |
 | `claude-bridge`, `anthropic` | Claude | session / week quota | `pi-claude-bridge` for the former; see the caveat below |
 | `devin`, plus one per extra account | D1, D2 | weekly quota | the `pi-devin` extension |
 | `antigravity` | AGY, Ext | Gemini and third-party quota | the `@estebanforge/pi-antigravity-bridge` extension |
 
 **Several of these rows do not exist without a third-party extension.**
-`muse-code`, `claude-bridge`, `devin` and `antigravity` are registered by the
+`claude-bridge`, `devin` and `antigravity` are registered by the
 extensions above; without them pi has no such provider, the panel has nothing to
 ask, and no row appears. That is not a failure — install the extension and the
 row shows up.
@@ -71,27 +71,28 @@ picked up automatically.
 
 This differs per provider and is worth knowing before filing a bug.
 
-**Pi's own credential store** — `openai-codex`, `deepseek`, `openrouter`, and
-every `devin*`. Configure them in pi and you are done. The token is resolved at
-poll time and only a hash of it is ever stored, as the account id.
+**Pi's own credential store** — `deepseek`, `openrouter`, and every `devin*`.
+Configure them in pi and you are done. The token is resolved at poll time and
+only a hash of it is ever stored, as the account id.
 
-**The provider's own CLI** — `claude`, `antigravity`, `muse`. These read the
-credential that CLI already keeps locally:
+**Omarchy's agent-usage records** — `claude`, `openai-codex`, `meta`,
+`antigravity`. These read the usage record Omarchy already maintains at
+`~/.local/state/omarchy/agents/usage/<agent>.json`, so every pi session shares
+Omarchy's single probe instead of each hitting the provider itself. No
+credential is resolved here at all; Omarchy owns sign-in and refresh. (The
+antigravity record is `gemini.json` — Omarchy's collector ids it `gemini`.)
 
-| Provider | Read from | Produced by |
-| --- | --- | --- |
-| `claude` | `~/.claude/.credentials.json` | `claude` sign-in |
-| `antigravity` | OS keyring, `service=gemini username=antigravity` | `agy` sign-in |
-| `muse` | `~/.config/muse/auth.json` | `muse` sign-in |
+The panel never logs in for you and never writes credential files. For the
+Omarchy-routed rows, Omarchy owns the sign-in; if a row is missing or errored,
+refresh Omarchy's record (`omarchy-agent-usage-update --force <agent>`).
 
-The panel never logs in for you and never writes these files. If a row is
-missing or errored, sign in with that provider's own CLI first. Because these are
-read at poll time, a refresh performed by the CLI is picked up on the next poll.
-
-**Caveat on `anthropic`.** pi has a built-in `anthropic` provider for a plain API
-key, but this package's Claude route reads the **Claude CLI's** subscription
-credential. An Anthropic API key alone is therefore not enough to populate that
-row; sign in with the `claude` CLI.
+**Caveat on `anthropic` and the Omarchy tap.** The Claude, Codex, Muse and
+Antigravity rows show whatever Omarchy last wrote. If Omarchy's collector stalls, the row ages and is
+marked stale; but Omarchy republishes last-good limits after a failed upstream
+probe while still bumping its write timestamp, so a *running-but-failing*
+collector can keep the row looking fresh while the number is old. That
+distinction is not recoverable from the record file — the panel reports what
+Omarchy reported.
 
 ### Subscription-backed vs API-billed
 
@@ -104,36 +105,50 @@ Both appear; they measure different things.
 
 ## Acquisition
 
-Every provider is read in one HTTP request. No TUI is driven, no PTY is
-allocated, and no provider CLI is executed.
+Most providers are read in one HTTP request. Claude, Codex, Muse and
+Antigravity are the exception: they read Omarchy's per-agent record file rather
+than probing the provider directly, so the panel adds zero requests for them.
+No TUI is driven, no PTY is allocated, and no provider CLI is executed.
 
 | Row | Source |
 | --- | --- |
-| Codex | `GET chatgpt.com/backend-api/wham/usage` — OAuth token; the account id is a claim inside the token |
+| Codex | Omarchy record `~/.local/state/omarchy/agents/usage/codex.json` (limits via `codex app-server` RPC) |
 | D1 / D2 | Connect RPC `server.codeium.com/…SeatManagementService/GetUserStatus` (protobuf) |
-| Claude | `GET api.anthropic.com/api/oauth/usage` |
-| AGY / Ext | `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` |
-| Muse | `POST api.meta.ai/muse-code/key` → `subs_usage` |
+| Claude | Omarchy record `~/.local/state/omarchy/agents/usage/claude.json` (limits via `api.anthropic.com/api/oauth/usage`) |
+| AGY / Ext | Omarchy record `~/.local/state/omarchy/agents/usage/gemini.json` (limits via `retrieveUserQuotaSummary`) |
+| Muse | Omarchy record `~/.local/state/omarchy/agents/usage/muse.json` (limits via `POST api.meta.ai/muse-code/key`) |
 | DS | `GET api.deepseek.com/user/balance` |
 | OR | `GET openrouter.ai/api/v1/credits` |
 
-The only subprocess is `secret-tool`, reading one keyring item for antigravity.
+No subprocess is spawned — the keyring read that antigravity used to need is
+now Omarchy's job.
 
 Details that are easy to get wrong, kept here because each one cost real time:
 
-- **Codex** — the account id is a nested claim in the access token
-  (`https://api.openai.com/auth` → `chatgpt_account_id`).
+- **Claude / Codex / Muse / Antigravity** — read Omarchy's `limits[]`, where
+  `percent` is a USED fraction in [0,1] mapped to remaining. Window matching is
+  anchored (`/^weekly/` not `/week/`) so a model-scoped extra like "Fable
+  Weekly" cannot steal the general weekly slot; the short windows use
+  `/^\d+[hm] window$/i` so a duration change still lands, and Antigravity's
+  third-party "Claude/GPT …" pair is matched separately into the external
+  slots. A record is rejected unless its `id` matches the agent and it carries
+  a parseable `updatedAt` — that timestamp is the record's publication time,
+  which is what ages the row. These readings carry `source:'omarchy'` and get a
+  longer stale window (35m) than directly-polled rows, because the collector
+  rewrites the record on a ~900s cadence.
 - **Devin** — authenticates with `Basic <key>-<key>`, i.e. the key duplicated
   around a hyphen and **not** base64-encoded; the body is protobuf and the weekly
   figure is `plan_status` field 15, where absent means 0.
-- **Antigravity** — must use the **`daily-` host**; production
-  `cloudcode-pa.googleapis.com` answers `403` for this method. Its token is in
-  the OS keyring, *not* in `~/.gemini/oauth_creds.json`, which is a different
-  credential and 403s.
-- **Muse** — `subs_usage` is omitted in some subscription states. An absent
-  measurement is never rendered as `0%`: the row reports an error instead.
-  It reappears once the account has activity (a single message to muse
-  re-ups it), so the row clears on its own.
+- **Antigravity** — Omarchy's collector uses the **`daily-` host** (production
+  `cloudcode-pa.googleapis.com` answers `403`) and the agy keyring token. That
+  token lasts ~an hour and only agy refreshes it, so when agy has not run
+  recently the record carries `usageStatusText` like "Sign-in expired" while
+  republishing last-good limits — the running-but-failing case the `updatedAt`
+  timestamp cannot distinguish.
+- **Muse** — the upstream `subs_usage` field is omitted in some subscription
+  states, so Omarchy may publish a record with no matching limits. An absent
+  measurement is never rendered as `0%`: the row reports an error instead and
+  clears once Omarchy next records real limits.
 
 ## Layout
 
@@ -182,8 +197,7 @@ Environment variables:
 | `PI_QUOTA_PANEL_POLL_MS` | Provider polling cadence (default 300000; floor 30000) |
 | `PI_QUOTA_PANEL_REFRESH_MS` | Row recompute cadence (default 15000; `0` disables) |
 | `PI_QUOTA_PANEL_ROOT` | Where the snapshot is cached (default `~/.local/share/pi-quota-panel`) |
-| `CLAUDE_CREDENTIALS_PATH` | Override the Claude credentials file location |
-| `XDG_RUNTIME_DIR` | Standard; how the D-Bus keyring is reached for antigravity |
+| `XDG_STATE_HOME` | Standard; where the Omarchy agent-usage records are read from (default `~/.local/state`) |
 
 ## What is here
 
@@ -212,14 +226,16 @@ credential; the poller is tested for its honesty rules, including a hung adapter
 that must not stall the cycle; the cache is tested for atomicity and for carrying
 no credential material.
 
-All eight sources have been verified against the live endpoints — codex, devin
-(both accounts), claude, antigravity, muse, deepseek and openrouter.
+All sources have been verified against their live data — codex, devin
+(both accounts), claude, antigravity, muse, deepseek and openrouter. (Claude,
+Codex, Muse and Antigravity are verified against their Omarchy records, which
+are themselves verified against the live endpoints.)
 
 Known limits:
 
-- Linux only. The abstract-socket-free design still leans on `secret-tool` and
-  the D-Bus keyring for antigravity, and on `/proc`-free but Linux-specific
-  credential locations for the rest.
+- Linux only. The Omarchy-routed rows depend on Omarchy's agent-usage records
+  under `~/.local/state/omarchy/`; the rest lean on Linux-specific credential
+  locations. There is no keyring/`secret-tool` dependency any more.
 - A couple of provider rows depend on undocumented endpoints. They are exercised
   by tests and covered by `dropped` reporting, but a backend change would show as
   an error row until the parse is updated.

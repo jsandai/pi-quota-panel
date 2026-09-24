@@ -7,9 +7,10 @@ import { deepseekAdapter } from './deepseek.mjs';
 import { openrouterAdapter } from './openrouter.mjs';
 
 /**
- * Adapter registry. Every adapter reads its provider over HTTP and declares a
- * fixed shape in `normalize`, so a caller never supplies a shell command, a URL
- * or a file path of its own choosing.
+ * Adapter registry. Most adapters read their provider over HTTP; the
+ * Omarchy-routed ones (claude, codex, muse) read a local record file instead.
+ * Every adapter declares a fixed shape in `normalize`, so a caller never
+ * supplies a shell command, a URL or a file path of its own choosing.
  *
  * @type {Map<string, import('../poll.mjs').Adapter>}
  */

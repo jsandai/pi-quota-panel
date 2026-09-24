@@ -38,34 +38,65 @@ const json = (res, obj, status = 200) => {
   res.end(JSON.stringify(obj));
 };
 
-test("codex reads rate_limit windows and sends the account id", async () => {
-  const m = await mock((_req, res) =>
-    json(res, {
-      plan_type: "plus",
-      rate_limit: {
-        primary_window: { used_percent: 6, reset_at: 1789600685, limit_window_seconds: 18000 },
-        secondary_window: { used_percent: 16, reset_at: 1790165252, limit_window_seconds: 604800 },
-      },
-    }),
-  );
+test("codex reads Omarchy's codex record and maps used fraction to remaining", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "panel-codex-"));
   try {
-    // A real-looking JWT so the adapter can pull the nested account claim.
-    const payload = Buffer.from(
-      JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
-    ).toString("base64url");
-    const token = `h.${payload}.s`;
-    const spec = codexAdapter.normalize({ token, baseUrl: m.base });
-    assert.equal(spec.parameters.accountId, "acct-1");
+    const usageFile = join(dir, "codex.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "codex", updatedAt: "2026-09-23T14:48:45.162251+00:00",
+      limits: [
+        { label: "5h window", percent: 0.34, resetsAt: "2026-09-23T17:33:18+00:00" },
+        { label: "Weekly (7-day)", percent: 0.05, resetsAt: "2026-09-30T12:33:18+00:00" },
+      ],
+    }));
+    const spec = codexAdapter.normalize({ usageFile });
     const out = await codexAdapter.run(spec.parameters, new AbortController().signal);
     const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
-    assert.equal(byMetric["quota:5h"].remainingPercent, 94); // used -> remaining
-    assert.equal(byMetric["quota:weekly"].remainingPercent, 84);
-    assert.equal(byMetric["quota:5h"].durationMinutes, 300);
-    assert.equal(m.seen[0].url, "/backend-api/wham/usage");
-    assert.equal(m.seen[0].headers["chatgpt-account-id"], "acct-1");
-    assert.equal(m.seen[0].headers.authorization, `Bearer ${token}`);
+    // Full precision is kept; the render layer rounds for display.
+    assert.ok(Math.abs(byMetric["quota:5h"].remainingPercent - 66) < 1e-6);   // 1 - 0.34
+    assert.ok(Math.abs(byMetric["quota:weekly"].remainingPercent - 95) < 1e-6); // 1 - 0.05
+    assert.equal(byMetric["quota:5h"].resetAt, "2026-09-23T17:33:18.000Z");
+    // observedAt tracks the record's updatedAt, not the read time.
+    assert.equal(out[0].observedAt, "2026-09-23T14:48:45.162Z");
   } finally {
-    m.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("codex with no Omarchy record is unavailable, never a fabricated value", async () => {
+  const spec = codexAdapter.normalize({ usageFile: "/nonexistent/codex.json" });
+  await assert.rejects(
+    () => codexAdapter.run(spec.parameters, new AbortController().signal),
+    (e) => e.code === "unavailable",
+  );
+});
+
+test("a record for the wrong agent, or with a bad percent, is rejected", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "panel-bad-"));
+  try {
+    // Wrong agent id must not be read as this provider's quota.
+    const wrongId = join(dir, "a.json");
+    await writeFile(wrongId, JSON.stringify({ id: "claude", updatedAt: "2026-09-23T14:00:00Z", limits: [{ label: "5h window", percent: 0.5 }] }));
+    await assert.rejects(
+      () => codexAdapter.run(codexAdapter.normalize({ usageFile: wrongId }).parameters, new AbortController().signal),
+      (e) => e.code === "invalid-response",
+    );
+    // A null/empty percent would otherwise coerce to 0 and fabricate 100%.
+    const badPct = join(dir, "b.json");
+    await writeFile(badPct, JSON.stringify({ id: "codex", updatedAt: "2026-09-23T14:00:00Z", limits: [{ label: "5h window", percent: null }] }));
+    await assert.rejects(
+      () => codexAdapter.run(codexAdapter.normalize({ usageFile: badPct }).parameters, new AbortController().signal),
+      (e) => e.code === "invalid-response",
+    );
+    // Missing updatedAt cannot be aged honestly, so it is rejected.
+    const noTs = join(dir, "c.json");
+    await writeFile(noTs, JSON.stringify({ id: "codex", limits: [{ label: "5h window", percent: 0.5 }] }));
+    await assert.rejects(
+      () => codexAdapter.run(codexAdapter.normalize({ usageFile: noTs }).parameters, new AbortController().signal),
+      (e) => e.code === "invalid-response",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -103,104 +134,145 @@ test("devin rejects an empty token up front", () => {
   assert.throws(() => devinAdapter.normalize({}), /Invalid devin request/);
 });
 
-test("claude maps utilization (used) to remaining", async () => {
+test("claude reads Omarchy's claude record and maps used fraction to remaining", async () => {
   const dir = await mkdtemp(join(tmpdir(), "panel-claude-"));
   try {
-    const creds = join(dir, "credentials.json");
-    await writeFile(creds, JSON.stringify({ claudeAiOauth: { accessToken: "tok-123" } }));
-    const m = await mock((_req, res) =>
-      json(res, {
-        five_hour: { utilization: 42, resets_at: "2026-09-16T20:20:00.963644+00:00" },
-        seven_day: { utilization: 97, resets_at: "2026-09-17T08:59:59.963666+00:00" },
-      }),
-    );
-    try {
-      const spec = claudeAdapter.normalize({ credentialsFile: creds, baseUrl: m.base });
-      const out = await claudeAdapter.run(spec.parameters, new AbortController().signal);
-      const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
-      assert.equal(byMetric["quota:session"].remainingPercent, 58);
-      assert.equal(byMetric["quota:week"].remainingPercent, 3);
-      assert.equal(m.seen[0].headers.authorization, "Bearer tok-123");
-      assert.equal(m.seen[0].url, "/api/oauth/usage");
-    } finally {
-      m.close();
-    }
+    const usageFile = join(dir, "claude.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "claude", updatedAt: "2026-09-23T14:48:44.104846+00:00",
+      limits: [
+        // Scoped extra FIRST: it must not steal the weekly slot.
+        { label: "Fable Weekly", percent: 0.06, resetsAt: "2026-09-24T09:00:00+00:00" },
+        { label: "Session (5-hour)", percent: 0.42, resetsAt: "2026-09-16T20:20:00+00:00" },
+        { label: "Weekly (7-day)", percent: 0.97, resetsAt: "2026-09-17T08:59:59+00:00" },
+      ],
+    }));
+    const spec = claudeAdapter.normalize({ usageFile });
+    const out = await claudeAdapter.run(spec.parameters, new AbortController().signal);
+    const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
+    assert.ok(Math.abs(byMetric["quota:session"].remainingPercent - 58) < 1e-6); // 1 - 0.42
+    assert.ok(Math.abs(byMetric["quota:week"].remainingPercent - 3) < 1e-6);      // 1 - 0.97
+    assert.equal(out.length, 2);                                  // Fable Weekly dropped
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("claude with no credential is unauthorized, never a fabricated value", async () => {
-  const spec = claudeAdapter.normalize({ credentialsFile: "/nonexistent/creds.json", baseUrl: "http://127.0.0.1:1" });
+test("claude reports an absent session window as idle (100%), not stale", async () => {
+  // Omarchy drops a limit once its resetsAt passes, so a closed 5h session
+  // window vanishes from the record between uses. With the record valid and
+  // fresh, that absence must read as 100% remaining, not a stale/failed metric.
+  const dir = await mkdtemp(join(tmpdir(), "panel-claude-idle-"));
+  try {
+    const usageFile = join(dir, "claude.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "claude", updatedAt: "2026-09-24T04:30:00+00:00",
+      limits: [
+        // No Session (5-hour) entry — the window closed and Claude is idle.
+        { label: "Weekly (7-day)", percent: 0.44, resetsAt: "2026-09-24T08:59:59+00:00" },
+        { label: "Fable Weekly", percent: 0.06, resetsAt: "2026-09-24T08:59:59+00:00" },
+      ],
+    }));
+    const spec = claudeAdapter.normalize({ usageFile });
+    const out = await claudeAdapter.run(spec.parameters, new AbortController().signal);
+    const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
+    assert.equal(byMetric["quota:session"].remainingPercent, 100);
+    assert.equal(byMetric["quota:session"].resetAt, null);
+    assert.ok(Math.abs(byMetric["quota:week"].remainingPercent - 56) < 1e-6);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claude with no Omarchy record is unavailable, never a fabricated value", async () => {
+  const spec = claudeAdapter.normalize({ usageFile: "/nonexistent/claude.json" });
   await assert.rejects(
     () => claudeAdapter.run(spec.parameters, new AbortController().signal),
-    (e) => e.code === "unauthorized",
+    (e) => e.code === "unavailable",
   );
 });
 
-test("antigravity maps groups and buckets to the four quota windows", async () => {
-  const m = await mock((_req, res) =>
-    json(res, {
-      groups: [
-        { displayName: "Gemini Models", buckets: [
-          { bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.9975063, resetTime: "2026-09-23T20:10:55Z" },
-          { bucketId: "gemini-5h", window: "5h", remainingFraction: 0.9850379, resetTime: "2026-09-17T01:10:55Z" },
-        ] },
-        { displayName: "Claude and GPT models", buckets: [
-          { bucketId: "3p-weekly", window: "weekly", remainingFraction: 0.6643313, resetTime: "2026-09-19T19:18:07Z" },
-          { bucketId: "3p-5h", window: "5h", remainingFraction: 1, resetTime: "2026-09-17T01:29:36Z" },
-        ] },
-      ],
-    }),
-  );
+test("antigravity reads Omarchy's gemini record into the four quota windows", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "panel-agy-"));
   try {
-    const spec = antigravityAdapter.normalize({ token: "k", baseUrl: m.base });
+    const usageFile = join(dir, "gemini.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "gemini", updatedAt: "2026-09-23T18:49:49.677598+00:00",
+      limits: [
+        { label: "5h window", percent: 0.0, resetsAt: "2026-09-23T23:49:35Z" },
+        { label: "Weekly (7-day)", percent: 0.0061, resetsAt: "2026-09-23T20:10:55Z" },
+        { label: "Claude/GPT 5h", percent: 0.0, resetsAt: "2026-09-23T23:49:35Z" },
+        { label: "Claude/GPT Weekly (7-day)", percent: 0.0, resetsAt: "2026-09-30T18:49:35Z" },
+      ],
+    }));
+    const spec = antigravityAdapter.normalize({ usageFile });
     const out = await antigravityAdapter.run(spec.parameters, new AbortController().signal);
     const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value.remainingPercent]));
-    assert.deepEqual(byMetric, {
-      "quota:weekly": 100, "quota:5h": 99,
-      "quota:external_weekly": 66, "quota:external_5h": 100,
-    });
-    assert.equal(m.seen[0].url, "/v1internal:retrieveUserQuotaSummary");
-    assert.equal(m.seen[0].method, "POST");
+    // The Claude/GPT pair must fill the EXTERNAL slots, never the plain ones.
+    assert.deepEqual(Object.keys(byMetric).sort(), [
+      "quota:5h", "quota:external_5h", "quota:external_weekly", "quota:weekly",
+    ]);
+    assert.ok(Math.abs(byMetric["quota:weekly"] - 99.39) < 0.01); // 1 - 0.0061
+    assert.equal(byMetric["quota:5h"], 100);
+    assert.equal(byMetric["quota:external_5h"], 100);
+    assert.equal(byMetric["quota:external_weekly"], 100);
+    assert.equal(out[0].source, "omarchy");
   } finally {
-    m.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("muse reads subs_usage and sends a Bearer token", async () => {
-  const m = await mock((_req, res) =>
-    json(res, {
-      subs_usage: {
-        window: { used_percent: 0, window_duration_mins: 300, resets_at: 1789601423 },
-        weekly: { used_percent: 1, resets_at: 1789948800 },
-      },
-    }),
-  );
+test("muse reads Omarchy's muse record and maps used fraction to remaining", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "panel-muse-"));
   try {
-    const spec = museAdapter.normalize({ token: "muse-tok", mintBaseUrl: m.base });
+    const usageFile = join(dir, "muse.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "muse", updatedAt: "2026-09-23T18:24:04.158334+00:00",
+      limits: [
+        { label: "5h window", percent: 0.06, resetsAt: "2026-09-23T19:14:58+00:00" },
+        { label: "Weekly (7-day)", percent: 0.05, resetsAt: "2026-09-28T00:00:00+00:00" },
+      ],
+    }));
+    const spec = museAdapter.normalize({ usageFile });
     const out = await museAdapter.run(spec.parameters, new AbortController().signal);
     const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
-    assert.equal(byMetric["quota:window"].remainingPercent, 100);
-    assert.equal(byMetric["quota:weekly"].remainingPercent, 99);
-    assert.equal(m.seen[0].headers.authorization, "Bearer muse-tok");
-    assert.equal(m.seen[0].url, "/muse-code/key");
+    assert.ok(Math.abs(byMetric["quota:window"].remainingPercent - 94) < 1e-6);  // 1 - 0.06
+    assert.ok(Math.abs(byMetric["quota:weekly"].remainingPercent - 95) < 1e-6);  // 1 - 0.05
+    assert.equal(byMetric["quota:window"].resetAt, "2026-09-23T19:14:58.000Z");
+    assert.equal(out[0].source, "omarchy");
   } finally {
-    m.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("muse with no subs_usage reports an error rather than 0%", async () => {
-  const m = await mock((_req, res) => json(res, { is_subs_active: true, subs_tier_name: "Everyday" }));
+test("muse matches a non-5h short window by duration label", async () => {
+  // The short-window label is "<N>h window" from window_duration_mins, so a
+  // 3h window must still land in quota:window, not be dropped.
+  const dir = await mkdtemp(join(tmpdir(), "panel-muse3h-"));
   try {
-    const spec = museAdapter.normalize({ token: "t", mintBaseUrl: m.base });
-    await assert.rejects(
-      () => museAdapter.run(spec.parameters, new AbortController().signal),
-      (e) => e.code === "invalid-response",
-    );
+    const usageFile = join(dir, "muse.json");
+    await writeFile(usageFile, JSON.stringify({
+      schemaVersion: 1, id: "muse", updatedAt: "2026-09-23T18:24:04Z",
+      limits: [
+        { label: "3h window", percent: 0.5, resetsAt: "2026-09-23T21:00:00+00:00" },
+        { label: "Weekly (7-day)", percent: 0.1, resetsAt: "2026-09-28T00:00:00+00:00" },
+      ],
+    }));
+    const spec = museAdapter.normalize({ usageFile });
+    const out = await museAdapter.run(spec.parameters, new AbortController().signal);
+    const byMetric = Object.fromEntries(out.map((o) => [o.metric, o.value]));
+    assert.ok(Math.abs(byMetric["quota:window"].remainingPercent - 50) < 1e-6);
   } finally {
-    m.close();
+    await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("muse with no Omarchy record is unavailable, never a fabricated value", async () => {
+  const spec = museAdapter.normalize({ usageFile: "/nonexistent/muse.json" });
+  await assert.rejects(
+    () => museAdapter.run(spec.parameters, new AbortController().signal),
+    (e) => e.code === "unavailable",
+  );
 });
 
 test("deepseek preserves decimal strings and never combines currencies", async () => {
@@ -238,14 +310,11 @@ test("openrouter reports remaining credit from total minus usage", async () => {
   }
 });
 
-test("every adapter refuses an insecure non-loopback base", async () => {
+test("every HTTP adapter refuses an insecure non-loopback base", async () => {
   const cases = [
-    [codexAdapter, { token: "t", baseUrl: "http://example.com" }],
     [devinAdapter, { token: "t", baseUrl: "http://example.com" }],
-    [museAdapter, { token: "t", mintBaseUrl: "http://example.com" }],
     [deepseekAdapter, { token: "t", baseUrl: "http://example.com" }],
     [openrouterAdapter, { token: "t", baseUrl: "http://example.com" }],
-    [antigravityAdapter, { token: "t", baseUrl: "http://example.com" }],
   ];
   for (const [adapter, config] of cases) {
     const spec = adapter.normalize(config);
@@ -261,7 +330,6 @@ test("an HTTP 401 becomes unauthorized, not a parse error", async () => {
   const m = await mock((_req, res) => json(res, { error: "nope" }, 401));
   try {
     for (const [adapter, config] of [
-      [codexAdapter, { token: "t", baseUrl: m.base, accountId: "a" }],
       [deepseekAdapter, { token: "t", baseUrl: m.base }],
       [openrouterAdapter, { token: "t", baseUrl: m.base }],
     ]) {
@@ -276,27 +344,14 @@ test("an HTTP 401 becomes unauthorized, not a parse error", async () => {
   }
 });
 
-test("codex identity follows the account, not the rotating access token", () => {
-  // OAuth renewal hands the panel a fresh access token each time. Two tokens
-  // carrying the same chatgpt_account_id claim must normalize to ONE credential
-  // scope — otherwise every renewal mints a new "account" whose predecessor's
-  // readings freeze and can keep rendering ahead of the live one.
-  const jwt = (accountId, tag) => {
-    const payload = Buffer.from(
-      JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId }, nonce: tag }),
-    ).toString("base64url");
-    return `h.${payload}.${tag}`;
-  };
-  const first = codexAdapter.normalize({ token: jwt("acct-1", "tok1") });
-  const renewed = codexAdapter.normalize({ token: jwt("acct-1", "tok2") });
-  assert.equal(first.credentialScope, renewed.credentialScope,
-    "renewal must update the same identity, not mint a new account");
-
-  const other = codexAdapter.normalize({ token: jwt("acct-2", "tok1") });
-  assert.notEqual(other.credentialScope, first.credentialScope,
-    "genuinely different accounts stay distinct");
-
-  const undecodable = codexAdapter.normalize({ token: "not-a-jwt" });
-  assert.equal(undecodable.credentialScope, "codex:not-a-jwt",
-    "a token without a decodable claim falls back to the token itself");
+test("claude/codex identity is the Omarchy record path, not a credential", () => {
+  // The identity is the file the adapter reads, so it stays stable across the
+  // token rotations that used to mint a new account on every OAuth renewal.
+  const a = claudeAdapter.normalize({ usageFile: "/x/claude.json" });
+  const b = claudeAdapter.normalize({ usageFile: "/x/claude.json" });
+  assert.equal(a.credentialScope, b.credentialScope);
+  const other = claudeAdapter.normalize({ usageFile: "/x/other.json" });
+  assert.notEqual(other.credentialScope, a.credentialScope);
+  // No credential material ever enters the scope.
+  assert.ok(a.credentialScope.startsWith("omarchy:"));
 });

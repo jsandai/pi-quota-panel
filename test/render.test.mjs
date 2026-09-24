@@ -59,6 +59,46 @@ test('a second account exposed as its own provider gets its own row', () => {
   assert.deepEqual(three.map(c => c.account), [acc('a'), acc('b'), acc('c')]);
 });
 
+test('a meta reading fills the Muse cell (built-in provider id)', () => {
+  // pi 0.87.1 registers Muse as the built-in `meta` provider; the Muse cell
+  // must find it even though its spec still lists the retired `muse-code` id.
+  const cells = groupRows([success(id('meta', acc('f'), 'quota:weekly'), quota(88), at)], [], { now: NOW });
+  assert.equal(cells.length, 1);
+  assert.equal(cells[0].spec.label, 'Muse');
+  assert.equal(cells[0].provider, 'meta');
+});
+
+test('meta wins the Muse cell over legacy muse-code; muse-code alone still renders', () => {
+  // Both ids can have readings while a stale muse-code snapshot lingers. The
+  // cell must prefer the live `meta` provider.
+  const both = groupRows([
+    success(id('meta', acc('f'), 'quota:weekly'), quota(88), at),
+    success(id('muse-code', acc('9'), 'quota:weekly'), quota(10), '2026-09-14T00:00:00Z'),
+  ], [], { now: NOW });
+  assert.equal(both.length, 1);
+  assert.equal(both[0].provider, 'meta');
+  // With only a legacy reading, the altProviders fallback still renders it.
+  const legacy = groupRows([success(id('muse-code', acc('9'), 'quota:weekly'), quota(10), at)], [], { now: NOW });
+  assert.equal(legacy.length, 1);
+  assert.equal(legacy[0].spec.label, 'Muse');
+  assert.equal(legacy[0].provider, 'muse-code');
+});
+
+test('an omarchy-sourced reading gets a longer stale window', () => {
+  // Omarchy rewrites its record ~every 900s, so a 15-min threshold would flag
+  // the row ⚠ just before each refresh. source:'omarchy' buys a longer window.
+  const a = acc('b');
+  // freshAt 20 min before `now`: past the default 15m limit, inside omarchy 35m.
+  const fresh = '2026-09-15T11:40:00Z';
+  const old = success(id('meta', a, 'quota:window'), quota(40), fresh, 'omarchy');
+  const cells = groupRows([old], [], { now: NOW });
+  assert.equal(cells[0].stale, false);
+  // Same age on a directly-polled provider is stale.
+  const direct = success(id('deepseek', a, 'balance:USD'), balance('USD', '1'), fresh);
+  const dcells = groupRows([direct], [], { now: NOW });
+  assert.equal(dcells[0].stale, true);
+});
+
 test('a stale reading keeps its value but is marked; failure with no last-good shows error', () => {
   const a = acc('b');
   const stale = success(id('muse-code', a, 'quota:window'), quota(40), '2026-09-14T00:00:00Z');

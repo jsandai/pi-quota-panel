@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { MUSE_TOKEN_FILE } from './adapters/muse.mjs';
 
 /**
  * Provider discovery and credential resolution — the pi-side half of the panel.
@@ -28,7 +27,8 @@ export function accountId(scope) {
  *
  *   'pi'       resolved from pi's credential store (getProviderAuth)
  *   'cliFile'  the adapter reads the provider CLI's own file at poll time
- *   'keyring'  the adapter reads the OS keyring at poll time
+ *   'omarchy'  the adapter reads Omarchy's per-agent usage record; no
+ *              credential is resolved at all
  *
  * `match` is a pattern rather than a fixed name where the provider id is
  * user-chosen: an extension registering one provider per account ids them from
@@ -37,12 +37,12 @@ export function accountId(scope) {
  */
 const ROUTES = [
   { match: /^devin(-|$)/, adapter: 'devin', credential: 'pi' },
-  { match: /^openai-codex$/, adapter: 'codex', credential: 'pi' },
+  { match: /^openai-codex$/, adapter: 'codex', credential: 'omarchy' },
   { match: /^deepseek$/, adapter: 'deepseek', credential: 'pi' },
   { match: /^openrouter$/, adapter: 'openrouter', credential: 'pi' },
-  { match: /^muse-code$/, adapter: 'muse', credential: 'museFile' },
-  { match: /^(anthropic|claude-bridge)$/, adapter: 'claude', credential: 'cliFile' },
-  { match: /^antigravity$/, adapter: 'antigravity', credential: 'keyring' },
+  { match: /^(meta|muse-code)$/, adapter: 'muse', credential: 'omarchy' },
+  { match: /^(anthropic|claude-bridge)$/, adapter: 'claude', credential: 'omarchy' },
+  { match: /^antigravity$/, adapter: 'antigravity', credential: 'omarchy' },
 ];
 
 /** @param {string} provider */
@@ -89,14 +89,10 @@ export async function buildRequests(registry, { resolveAuth } = {}) {
       const token = tokenFrom(auth);
       if (!token) { dropped.push({ provider, reason: 'no-credential' }); continue; }
       config.token = token;
-    } else if (route.credential === 'museFile') {
-      // muse-code registers a literal placeholder apiKey, so pi has no usable
-      // credential; the real token lives in the muse CLI's auth.json and is
-      // rewritten on refresh. Hand over the path, not a snapshot of the token.
-      config.tokenFile = MUSE_TOKEN_FILE;
     }
-    // 'cliFile' and 'keyring' need nothing: the adapter reads its own source at
-    // poll time, so a refresh performed by that CLI is picked up automatically.
+    // 'cliFile' and 'omarchy' need nothing: the adapter reads its
+    // own source at poll time, so a refresh performed by that CLI (or Omarchy)
+    // is picked up automatically.
     requests.push({ provider, adapter: route.adapter, config });
   }
 

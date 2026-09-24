@@ -18,6 +18,7 @@ test("routes address a provider to its adapter, and nothing else", () => {
   assert.equal(routeFor("deepseek")?.adapter, "deepseek");
   assert.equal(routeFor("openrouter")?.adapter, "openrouter");
   assert.equal(routeFor("muse-code")?.adapter, "muse");
+  assert.equal(routeFor("meta")?.adapter, "muse");
   assert.equal(routeFor("claude-bridge")?.adapter, "claude");
   assert.equal(routeFor("anthropic")?.adapter, "claude");
   assert.equal(routeFor("antigravity")?.adapter, "antigravity");
@@ -38,9 +39,8 @@ test("every provider id an extension registers per account routes to the same ad
 
 test("a token resolved from pi is what gets handed to the adapter", async () => {
   const reg = registry({
-    ids: ["openai-codex", "devin", "devin-alt", "deepseek"],
+    ids: ["devin", "devin-alt", "deepseek"],
     auth: {
-      "openai-codex": apiKey("oauth-access"),
       "devin": apiKey("key-primary"),
       "devin-alt": apiKey("key-secondary"),
       "deepseek": apiKey("sk-deep"),
@@ -86,23 +86,36 @@ test("an explicitly unconfigured provider is skipped", async () => {
   assert.deepEqual(dropped, [{ provider: "deepseek", reason: "unconfigured" }]);
 });
 
-test("muse gets its token file rather than the placeholder pi advertises", async () => {
-  // the muse-code provider registers apiKey "muse-code-local"; a token of that
-  // value would be rejected by the mint, so the path is passed instead.
-  const reg = registry({ ids: ["muse-code"], auth: { "muse-code": apiKey("muse-code-local") } });
-  const { requests } = await buildRequests(reg);
-  assert.equal(requests[0].adapter, "muse");
-  assert.equal(typeof requests[0].config.tokenFile, "string");
-  assert.match(requests[0].config.tokenFile, /muse[/\\]auth\.json$/);
-  assert.equal(requests[0].config.token, undefined);
+test("muse (meta and legacy muse-code) reads Omarchy, no credential resolved", async () => {
+  // Both the built-in `meta` provider and the retired `muse-code` route to the
+  // omarchy reader; neither resolves a token from pi's store.
+  const reg = registry({ ids: ["meta", "muse-code"], auth: {} });
+  const { requests, dropped } = await buildRequests(reg);
+  assert.equal(dropped.length, 0);
+  assert.deepEqual(requests.map((r) => r.adapter), ["muse", "muse"]);
+  for (const r of requests) assert.deepEqual(r.config, {});
 });
 
-test("claude and antigravity need nothing from pi", async () => {
-  const reg = registry({ ids: ["claude-bridge", "antigravity"], auth: {} });
+test("claude, codex and antigravity need no credential from pi", async () => {
+  // All three read Omarchy's usage records. None resolves a credential, so an
+  // empty auth map must not drop them and no token may be handed over.
+  const reg = registry({ ids: ["claude-bridge", "openai-codex", "antigravity"], auth: {} });
   const { requests, dropped } = await buildRequests(reg);
-  assert.equal(dropped.length, 0, "their provider placeholders must not be mistaken for missing credentials");
-  assert.deepEqual(requests.map((r) => r.adapter).sort(), ["antigravity", "claude"]);
-  for (const r of requests) assert.deepEqual(r.config, {});
+  assert.equal(dropped.length, 0, "file/record-backed providers must not be mistaken for missing credentials");
+  assert.deepEqual(requests.map((r) => r.adapter).sort(), ["antigravity", "claude", "codex"]);
+  for (const r of requests) {
+    assert.deepEqual(r.config, {});
+    assert.equal(r.config.token, undefined);
+  }
+});
+
+test("codex resolves even when pi has no OAuth token for it", async () => {
+  // Regression: codex used to drop as no-credential when getProviderAuth
+  // returned nothing. As an Omarchy reader it must resolve regardless.
+  const reg = registry({ ids: ["openai-codex"], auth: {} });
+  const { requests, dropped } = await buildRequests(reg);
+  assert.equal(dropped.length, 0);
+  assert.equal(requests[0].adapter, "codex");
 });
 
 test("the account id is a hash, so a token cannot reach a reading", () => {

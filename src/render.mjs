@@ -107,7 +107,7 @@ function rowSpecs(providerIds) {
     { key: 'codex', label: 'Codex', provider: 'openai-codex' },
     { key: 'gemini', label: 'AGY', provider: 'antigravity' },
     { key: 'gemini:external', label: 'Ext', provider: 'antigravity', external: true },
-    { key: 'muse', label: 'Muse', provider: 'muse-code' },
+    { key: 'muse', label: 'Muse', provider: 'meta', altProviders: ['muse-code'] },
     // The two pay-as-you-go balances share ONE cell so the grid stays a regular
     // two-per-line block: combining them keeps the last row at two cells
     // (Muse | Credits) instead of three, which is what made the split look
@@ -136,9 +136,9 @@ const EXT_SEVEN = ['quota:external_weekly'];
  * @param {Array<import('./poll.mjs').Reading>} readings
  * @param {Array<{provider:string,account:string,capability:string,metrics:string[]}>} [mappings]
  *   account ordering, when a caller has one; readings alone are sufficient.
- * @param {{now?:number, staleMs?:number}} [options]
+ * @param {{now?:number, staleMs?:number, omarchyStaleMs?:number}} [options]
  */
-export function groupRows(readings, mappings, { now = Date.now(), staleMs = 15 * 60_000 } = {}) {
+export function groupRows(readings, mappings, { now = Date.now(), staleMs = 15 * 60_000, omarchyStaleMs = 35 * 60_000 } = {}) {
   // Index readings by provider -> account -> {quota:Map, balances:[], stale, error}
   /** @type {Map<string, Map<string, {quota:Map<string,any>, balances:any[], stale:boolean, error:string|null}>>} */
   const byProvider = new Map();
@@ -167,7 +167,11 @@ export function groupRows(readings, mappings, { now = Date.now(), staleMs = 15 *
     // freshAt as infinitely old marked whole accounts stale forever whenever a
     // provider declared a metric it never returned (DeepSeek advertises CNY and
     // USD, but a given account has only one of them).
-    if (reading.freshAt && now - Date.parse(reading.freshAt) > staleMs) s.stale = true;
+    // Omarchy-routed readings age on the collector's ~900s cadence, which sits
+    // right at the default stale limit — they'd flicker ⚠ just before each
+    // refresh. Give them a window that outlasts one collector interval.
+    const limit = reading.source === 'omarchy' ? omarchyStaleMs : staleMs;
+    if (reading.freshAt && now - Date.parse(reading.freshAt) > limit) s.stale = true;
     if (reading.error && !reading.value) s.error = reading.error;
     if (reading.value?.kind === 'balance') s.balances.push(reading);
     else s.quota.set(metric, reading);

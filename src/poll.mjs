@@ -4,10 +4,10 @@ import { accountId } from './providers.mjs';
  * @typedef {{capability:'quota'|'balance', credentialScope:string, parameters:any,
  *   metrics:string[]}} AdapterSpec
  * @typedef {{normalize:(config:any)=>AdapterSpec,
- *   run:(parameters:any, signal:AbortSignal)=>Promise<Array<{metric:string, value:any, observedAt:string}>>}} Adapter
+ *   run:(parameters:any, signal:AbortSignal)=>Promise<Array<{metric:string, value:any, observedAt:string, source?:string}>>}} Adapter
  * @typedef {{provider:string, account:string, metric:string}} ReadingIdentity
  * @typedef {{identity:ReadingIdentity, value:any|null, freshAt:string|null,
- *   attemptedAt:string, error:string|null}} Reading
+ *   attemptedAt:string, error:string|null, source?:string}} Reading
  */
 
 /**
@@ -46,8 +46,8 @@ export const readingKey = identity => `${identity.provider}\u0000${identity.acco
  * A genuine observation.
  * @param {any} identity @param {any} value @param {string} observedAt
  */
-export function success(identity, value, observedAt) {
-  return { identity, value, freshAt: observedAt, attemptedAt: observedAt, error: null };
+export function success(identity, value, observedAt, source) {
+  return { identity, value, freshAt: observedAt, attemptedAt: observedAt, error: null, source };
 }
 
 /**
@@ -61,6 +61,9 @@ export function failure(identity, previous, code, attemptedAt) {
     freshAt: previous?.freshAt ?? null,
     attemptedAt,
     error: FAILURE_CODES.has(code) ? code : 'invalid-response',
+    // Keep the source tag so a failed refresh of an omarchy-backed reading does
+    // not lose its longer stale window.
+    ...(previous?.source ? { source: previous.source } : {}),
   };
 }
 
@@ -71,7 +74,7 @@ function record(idBase, metrics, observations, readings, at) {
     if (!observation || !metrics.includes(observation.metric) || seen.has(observation.metric)) continue;
     seen.add(observation.metric);
     const identity = { ...idBase, metric: observation.metric };
-    readings.set(readingKey(identity), success(identity, observation.value, observation.observedAt ?? at));
+    readings.set(readingKey(identity), success(identity, observation.value, observation.observedAt ?? at, observation.source));
   }
   // A metric the adapter did not report: if we held a value for it, losing it is
   // worth recording; if we never had one, it is simply absent and recording a
