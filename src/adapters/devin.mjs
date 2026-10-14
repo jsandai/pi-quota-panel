@@ -21,7 +21,10 @@
  *   field 15 = weekly_quota_remaining_percent  (absent = 0)
  *   field 17 = daily_quota_reset_at_unix
  *   field 18 = weekly_quota_reset_at_unix
- * We emit `quota:weekly`, matching the banner's "N% remaining (resets in …)".
+ * We emit `quota:weekly`, matching the banner's "N% remaining (resets in …)", and
+ * `quota:daily` (shown as the panel's 1D slot). A missing percent is 0 (proto3 drops
+ * zeros), but a daily window with neither percent nor reset isn't there at all, so
+ * no `quota:daily` is emitted rather than a false 0%.
  */
 
 const DEFAULT_BASE = 'https://server.codeium.com';
@@ -92,7 +95,7 @@ export const devinAdapter = {
       capability: /** @type {'quota'} */ ('quota'),
       credentialScope: `devin:${config.token}`,
       parameters: { token: config.token, baseUrl: config.baseUrl },
-      metrics: ['quota:weekly'],
+      metrics: ['quota:daily', 'quota:weekly'],
     };
   },
   /**
@@ -138,16 +141,23 @@ export const devinAdapter = {
     if (!planStatus) throw Object.assign(new Error('no plan_status'), { code: 'invalid-response' });
     const ps = parseMessage(planStatus);
 
-    const weeklyPct = numOf(ps, 15) ?? 0;              // absent = 0
-    const weeklyReset = numOf(ps, 18);
-    const remaining = Math.max(0, Math.min(100, weeklyPct));
-    const resetAt = Number.isFinite(weeklyReset) && weeklyReset > 0
-      ? new Date(weeklyReset * 1000).toISOString() : null;
-
-    return [{
-      metric: 'quota:weekly',
-      observedAt: new Date().toISOString(),
-      value: { kind: 'quota', remainingPercent: remaining, resetAt, durationMinutes: 7 * 24 * 60 },
-    }];
+    const observedAt = new Date().toISOString();
+    const window = (metric, pctField, resetField, durationMinutes) => {
+      const reset = numOf(ps, resetField);
+      return {
+        metric,
+        observedAt,
+        value: {
+          kind: 'quota',
+          remainingPercent: Math.max(0, Math.min(100, numOf(ps, pctField) ?? 0)),   // absent = 0
+          resetAt: Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : null,
+          durationMinutes,
+        },
+      };
+    };
+    const out = [];
+    if (numOf(ps, 14) !== undefined || numOf(ps, 17) !== undefined) out.push(window('quota:daily', 14, 17, 24 * 60));
+    out.push(window('quota:weekly', 15, 18, 7 * 24 * 60));
+    return out;
   },
 };

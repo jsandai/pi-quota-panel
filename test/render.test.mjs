@@ -144,6 +144,21 @@ test('layout packs two columns on wide terminals and one on narrow', () => {
   assert.equal(narrow.length, cells.length);          // single column, never drops
 });
 
+test('devin daily fills the first slot as 1D; a real 5h reading keeps 5H', () => {
+  const cells = groupRows([
+    success(id('devin', acc('a'), 'quota:daily'), quota(37, '2026-09-16T08:00:00Z'), at),
+    success(id('devin', acc('a'), 'quota:weekly'), quota(83), at),
+    success(id('devin-alt', acc('b'), 'quota:weekly'), quota(100), at),
+    success(id('openai-codex', acc('d'), 'quota:5h'), quota(55), at),
+  ], [], { now: NOW });
+  const text = (label) => renderRow(cells.find(c => c.spec.label === label), { now: NOW }).text;
+  assert.match(text('D1'), / 1D +37% ↻9\/1[56] \d\d:\d\d/);
+  assert.ok(!text('D1').includes('5H'));
+  assert.match(text('D2'), / 5H +— /);            // no daily reading yet: the slot stays 5H and empty
+  assert.match(text('Codex'), / 5H +55%/);
+  assert.equal(text('D1').length, text('Codex').length);   // columns still line up
+});
+
 test('empty snapshot renders a placeholder, not a crash', () => {
   const lines = layout([], { width: 80, now: NOW });
   assert.equal(lines.length, 1);

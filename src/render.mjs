@@ -125,6 +125,8 @@ const CURRENCY_SYMBOL = { USD: '$', EUR: '€', GBP: '£', CNY: '¥', JPY: '¥' 
 
 /** metric name -> which window slot it fills. */
 const FIVE_METRICS = ['quota:5h', 'quota:session', 'quota:window'];
+/** Devin has no 5-hour window; its daily one takes that slot, tagged 1D. */
+const DAILY_METRIC = 'quota:daily';
 const SEVEN_METRICS = ['quota:7d', 'quota:week', 'quota:weekly'];
 const EXT_FIVE = ['quota:external_5h'];
 const EXT_SEVEN = ['quota:external_weekly'];
@@ -283,6 +285,7 @@ export function renderRow(cell, { now = Date.now(), showResets = true, activePro
     const fiveNames = spec.external ? EXT_FIVE : FIVE_METRICS;
     const sevenNames = spec.external ? EXT_SEVEN : SEVEN_METRICS;
     const five = pickWindow(cell.quota, fiveNames);
+    const daily = !five && !spec.external ? pickWindow(cell.quota, [DAILY_METRIC]) : null;
     const seven = pickWindow(cell.quota, sevenNames);
     const win = (tag, rd) => {
       if (!rd) { push(` ${tag} ${padLeft('—', PCT_W)}`, 'dim'); push(' ' + pad('', RESET_W), null); return; }
@@ -299,7 +302,7 @@ export function renderRow(cell, { now = Date.now(), showResets = true, activePro
         push(' ' + pad('', RESET_W), null);
       }
     };
-    win('5H', five);
+    if (daily) win('1D', daily); else win('5H', five);
     push(' ', null);
     win('7D', seven);
   }

@@ -130,6 +130,31 @@ test("devin sends Basic <key>-<key>, not base64, and decodes plan_status", async
   }
 });
 
+test("devin emits quota:daily when the plan has a daily window, 0% when only its reset is present", async () => {
+  const vint = (n) => { const o = []; while (n > 0x7f) { o.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); } o.push(n); return Buffer.from(o); };
+  const fld = (num, body) => Buffer.concat([vint((num << 3) | 2), vint(body.length), body]);
+  const vf = (num, n) => Buffer.concat([vint(num << 3), vint(n)]);
+  const run = async (planStatus) => {
+    const m = await mock((_req, res) => { res.writeHead(200); res.end(fld(1, fld(13, planStatus))); });
+    try {
+      const spec = devinAdapter.normalize({ token: "k", baseUrl: m.base });
+      assert.deepEqual(spec.metrics, ["quota:daily", "quota:weekly"]);
+      return Object.fromEntries((await devinAdapter.run(spec.parameters, new AbortController().signal)).map((r) => [r.metric, r.value]));
+    } finally {
+      m.close();
+    }
+  };
+  const both = await run(Buffer.concat([vf(14, 37), vf(15, 83), vf(17, 1789862400), vf(18, 1789948800)]));
+  assert.equal(both["quota:daily"].remainingPercent, 37);
+  assert.equal(both["quota:daily"].resetAt, new Date(1789862400 * 1000).toISOString());
+  assert.equal(both["quota:daily"].durationMinutes, 24 * 60);
+  assert.equal(both["quota:weekly"].remainingPercent, 83);
+  const spent = await run(Buffer.concat([vf(15, 83), vf(17, 1789862400), vf(18, 1789948800)]));   // daily 0 is dropped on the wire
+  assert.equal(spent["quota:daily"].remainingPercent, 0);
+  const none = await run(Buffer.concat([vf(15, 83), vf(18, 1789948800)]));
+  assert.equal(none["quota:daily"], undefined);
+});
+
 test("devin rejects an empty token up front", () => {
   assert.throws(() => devinAdapter.normalize({}), /Invalid devin request/);
 });
