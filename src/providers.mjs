@@ -43,6 +43,8 @@ const ROUTES = [
   { match: /^(meta|muse-code)$/, adapter: 'muse', credential: 'omarchy' },
   { match: /^(anthropic|claude-bridge)$/, adapter: 'claude', credential: 'omarchy' },
   { match: /^antigravity$/, adapter: 'antigravity', credential: 'omarchy' },
+  { match: /^hive$/, adapter: 'hive', credential: 'omarchy' },
+  { match: /^hive-alt$/, adapter: 'hive-alt', credential: 'omarchy' },
 ];
 
 /** @param {string} provider */

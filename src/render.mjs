@@ -115,6 +115,8 @@ function rowSpecs(providerIds) {
     { key: 'credits', label: 'Credits', creditProviders: [
       { provider: 'deepseek', code: 'DS' },
       { provider: 'openrouter', code: 'OR' },
+      { provider: 'hive', code: 'H1' },
+      { provider: 'hive-alt', code: 'H2' },
     ] },
   ];
 }
@@ -172,7 +174,10 @@ export function groupRows(readings, mappings, { now = Date.now(), staleMs = 15 *
     // Omarchy-routed readings age on the collector's ~900s cadence, which sits
     // right at the default stale limit — they'd flicker ⚠ just before each
     // refresh. Give them a window that outlasts one collector interval.
-    const limit = reading.source === 'omarchy' ? omarchyStaleMs : staleMs;
+    // File-tap readings (omarchy, hive-cdp) age on an external collector's
+    // cadence, not ours — give them the longer window so they don't flicker ⚠
+    // between refreshes.
+    const limit = (reading.source === 'omarchy' || reading.source === 'hive-cdp') ? omarchyStaleMs : staleMs;
     if (reading.freshAt && now - Date.parse(reading.freshAt) > limit) s.stale = true;
     if (reading.error && !reading.value) s.error = reading.error;
     if (reading.value?.kind === 'balance') s.balances.push(reading);
@@ -259,12 +264,15 @@ export function renderRow(cell, { now = Date.now(), showResets = true, activePro
   push(pad(spec.label, LABEL_W), isActive ? 'accent' : 'muted');
 
   if (spec.creditProviders) {
-    // Combined ledger cell. Each pair occupies exactly one quota WINDOW_BLOCK_W
-    // so `DS` starts in the same column as `5H` and `OR` as `7D`; the cell is
-    // therefore the same width as a quota cell and the columns all line up.
-    const pairPad = WINDOW_BLOCK_W - (CREDIT_TAG_W + CREDIT_AMOUNT_W);
+    // Combined ledger cell. With two providers each pair padded out to
+    // WINDOW_BLOCK_W so DS/OR sat under the 5H/7D columns. With more, pairs
+    // pack as "TAG $amt" separated by single spaces so all of them stay
+    // inside the two window blocks (the green 5H/7D column span) instead of
+    // overflowing the cell.
+    const compact = spec.creditProviders.length > 2;
+    const pairPad = compact ? 0 : WINDOW_BLOCK_W - (CREDIT_TAG_W + CREDIT_AMOUNT_W);
     spec.creditProviders.forEach(({ provider, code }, index) => {
-      if (index > 0) push(' ', null);   // separator, mirroring the window gap
+      if (index > 0) push(compact ? ' ' : '  ', null);   // separator between pairs
       push(` ${pad(code, CREDIT_CODE_W)} `, 'dim');
       // A provider can have several balance readings (DeepSeek reports one per
       // currency) and one of them may be a failure with no value. Take the first
@@ -273,11 +281,13 @@ export function renderRow(cell, { now = Date.now(), showResets = true, activePro
       const bal = all.find((r) => r?.value) ?? all[0] ?? null;
       if (bal?.value) {
         const sym = CURRENCY_SYMBOL[bal.value.currency] ?? bal.value.currency;
-        // Negative balances keep the sign inside the value, not the padding.
-        push(padLeft(`${sym}${bal.value.total ?? '—'}`, CREDIT_AMOUNT_W),
+        const amount = `${sym}${bal.value.total ?? '—'}`;
+        // Compact mode drops the fixed-width pad — amounts size themselves.
+        push(compact ? amount : padLeft(amount, CREDIT_AMOUNT_W),
           bal.value.available === false ? 'warning' : 'success');
       } else {
-        push(padLeft(bal?.error ? 'err' : '—', CREDIT_AMOUNT_W), bal?.error ? 'error' : 'dim');
+        push(compact ? (bal?.error ? 'err' : '—') : padLeft(bal?.error ? 'err' : '—', CREDIT_AMOUNT_W),
+          bal?.error ? 'error' : 'dim');
       }
       push(' '.repeat(pairPad), null);
     });

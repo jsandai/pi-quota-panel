@@ -5,6 +5,7 @@ import { antigravityAdapter } from './antigravity.mjs';
 import { museAdapter } from './muse.mjs';
 import { deepseekAdapter } from './deepseek.mjs';
 import { openrouterAdapter } from './openrouter.mjs';
+import { hiveAdapter, hiveAltAdapter } from './hive.mjs';
 
 /**
  * Adapter registry. Most adapters read their provider over HTTP; the
@@ -22,4 +23,6 @@ export const adapters = new Map([
   ['muse', museAdapter],
   ['deepseek', deepseekAdapter],
   ['openrouter', openrouterAdapter],
+  ['hive', hiveAdapter],
+  ['hive-alt', hiveAltAdapter],
 ]);
