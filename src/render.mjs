@@ -315,12 +315,6 @@ export function renderRow(cell, { now = Date.now(), showResets = true, activePro
     if (daily) win('1D', daily); else win('5H', five);
     push(' ', null);
     win('7D', seven);
-    // Reserved banked-reset badge on every quota cell — uniform width keeps the
-    // columns aligned; ⚑N shows only when the provider has banked resets to
-    // spend (codex), blank padding for the rest.
-    const resets = cell.quota.get('resets:credits');
-    const count = resets?.value?.kind === 'resets' ? resets.value.count : 0;
-    push(' ' + pad(count > 0 ? `⚑${count}` : '', 3), count > 0 ? 'accent' : null);
   }
   // Reserved stale slot at the end.
   push(' ', null);

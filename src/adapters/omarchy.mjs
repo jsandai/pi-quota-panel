@@ -149,9 +149,12 @@ export function omarchyAdapter(agent, windows, { resetCredits = false } = {}) {
         if (count !== null) {
           const titles = Array.isArray(rc.credits)
             ? rc.credits.map(c => String(c?.title ?? '')).filter(Boolean) : [];
+          // Soonest expiry among the banked credits, for the chip's ↻<when>.
+          const expiresAt = Array.isArray(rc.credits)
+            ? rc.credits.map(c => iso(c?.expiresAt)).filter(Boolean).sort()[0] ?? null : null;
           out.push({
             metric: 'resets:credits', observedAt, source: 'omarchy',
-            value: { kind: 'resets', count, titles },
+            value: { kind: 'resets', count, titles, expiresAt },
           });
         }
       }

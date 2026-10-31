@@ -25,7 +25,7 @@ import { buildRequests } from "./providers.mjs";
 import { pollOnce } from "./poll.mjs";
 import { readCache, writeCache } from "./cache.mjs";
 import { loadConfig, saveConfig, settingItems, getSetting, setSetting } from "./config.mjs";
-import { groupRows, layout, severity } from "./render.mjs";
+import { groupRows, layout, severity, formatReset } from "./render.mjs";
 
 const WIDGET_KEY = "quota-panel";
 const STATUS_KEY = "quota-panel-active";
@@ -120,10 +120,17 @@ export function createPanel(pi: ExtensionAPI): void {
       ctx.ui.setStatus(STATUS_KEY, undefined);
       return;
     }
+    // Banked rate-limit resets ride the chip too: "· N reset(s) ↻<expiry>" so
+    // the count and when they lapse are visible without opening detail.
+    const resets = act && [...act.quota.values()].find((r: any) => r.value?.kind === "resets");
+    const resetCount = resets?.value?.count ?? 0;
+    const expiry = resets?.value?.expiresAt ? ` ↻${formatReset(resets.value.expiresAt, Date.now())}` : "";
+    const suffix = resetCount > 0 ? ` · ${resetCount} reset${resetCount === 1 ? "" : "s"}${expiry}` : "";
     ctx.ui.setStatus(
       STATUS_KEY,
       first
-        ? ctx.ui.theme.fg(severity(first.value.remainingPercent) as any, `${act.spec.label} ${Math.round(first.value.remainingPercent)}%`)
+        ? ctx.ui.theme.fg(severity(first.value.remainingPercent) as any, `${act.spec.label} ${Math.round(first.value.remainingPercent)}%`) +
+            ctx.ui.theme.fg("dim", suffix)
         : ctx.ui.theme.fg("dim", `${act.spec.label} —`),
     );
   }
@@ -311,7 +318,8 @@ export function createPanel(pi: ExtensionAPI): void {
           const parts = [`${r.spec.label} ${r.provider} (${r.account.slice(0, 8)})`];
           for (const [m, rd] of r.quota) {
             if (rd.value?.kind === "resets") {
-              parts.push(`resets=${rd.value.count}${rd.value.titles?.length ? ` (${rd.value.titles.join("; ")})` : ""}`);
+              const exp = rd.value.expiresAt ? `, expires ${formatReset(rd.value.expiresAt, Date.now())}` : "";
+              parts.push(`resets=${rd.value.count}${rd.value.titles?.length ? ` (${rd.value.titles.join("; ")})` : ""}${exp}`);
             } else {
               parts.push(`${m}=${rd.value ? Math.round(rd.value.remainingPercent) + "%" : (rd.error ?? "—")}`);
             }
