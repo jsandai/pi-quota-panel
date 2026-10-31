@@ -310,7 +310,11 @@ export function createPanel(pi: ExtensionAPI): void {
         const lines = rows().map((r: any) => {
           const parts = [`${r.spec.label} ${r.provider} (${r.account.slice(0, 8)})`];
           for (const [m, rd] of r.quota) {
-            parts.push(`${m}=${rd.value ? Math.round(rd.value.remainingPercent) + "%" : (rd.error ?? "—")}`);
+            if (rd.value?.kind === "resets") {
+              parts.push(`resets=${rd.value.count}${rd.value.titles?.length ? ` (${rd.value.titles.join("; ")})` : ""}`);
+            } else {
+              parts.push(`${m}=${rd.value ? Math.round(rd.value.remainingPercent) + "%" : (rd.error ?? "—")}`);
+            }
           }
           for (const b of r.balances) parts.push(`${b.value?.currency ?? ""} ${b.value?.total ?? "—"}`);
           if (r.stale) parts.push("[stale]");

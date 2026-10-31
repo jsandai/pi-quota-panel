@@ -63,9 +63,14 @@ const iso = v => (v && !Number.isNaN(Date.parse(v)) ? new Date(v).toISOString() 
  *   reset rather than letting the poller mark the missing metric stale. Only
  *   set this on windows that legitimately disappear when idle (the short
  *   session window), never on the always-present weekly.
+ * @param {{resetCredits?:boolean}} [options]
+ *   `resetCredits`: also emit a `resets:credits` reading carrying the record's
+ *   banked rate-limit resets (`resetCredits.availableCount` + credit titles).
+ *   Emitted only when the count is a non-negative number; absent/zero means no
+ *   badge, so the cell stays clean when there is nothing banked.
  * @returns {import('../poll.mjs').Adapter}
  */
-export function omarchyAdapter(agent, windows) {
+export function omarchyAdapter(agent, windows, { resetCredits = false } = {}) {
   return {
     /**
      * The credentialScope is the record path: the identity is the file, not a
@@ -78,7 +83,7 @@ export function omarchyAdapter(agent, windows) {
         capability: /** @type {'quota'} */ ('quota'),
         credentialScope: `omarchy:${file}`,
         parameters: { usageFile: file },
-        metrics: windows.map(w => w.metric),
+        metrics: [...windows.map(w => w.metric), ...(resetCredits ? ['resets:credits'] : [])],
       };
     },
     /** @param {{usageFile:string}} parameters */
@@ -134,6 +139,21 @@ export function omarchyAdapter(agent, windows) {
           metric: spec.metric, observedAt, source: 'omarchy',
           value: { kind: 'quota', remainingPercent: 100, resetAt: null, durationMinutes: null },
         });
+      }
+      // Banked rate-limit resets ride along as a non-quota reading so the cell
+      // can badge the count without disturbing the quota windows.
+      if (resetCredits) {
+        const rc = record.resetCredits;
+        const count = rc && typeof rc.availableCount === 'number' && Number.isFinite(rc.availableCount)
+          ? Math.max(0, Math.round(rc.availableCount)) : null;
+        if (count !== null) {
+          const titles = Array.isArray(rc.credits)
+            ? rc.credits.map(c => String(c?.title ?? '')).filter(Boolean) : [];
+          out.push({
+            metric: 'resets:credits', observedAt, source: 'omarchy',
+            value: { kind: 'resets', count, titles },
+          });
+        }
       }
       if (!out.length) throw Object.assign(new Error(`no ${agent} limits`), { code: 'invalid-response' });
       return out;

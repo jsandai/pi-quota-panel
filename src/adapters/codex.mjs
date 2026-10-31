@@ -18,4 +18,4 @@ export const codexAdapter = omarchyAdapter('codex', [
   // Anchored to the general window labels the collector emits.
   { match: /^5h|^5-?hour|^primary/i,   metric: 'quota:5h', idleWhenAbsent: true },
   { match: /^weekly|^7-?day|^secondary/i, metric: 'quota:weekly' },
-]);
+], { resetCredits: true });
